@@ -1,13 +1,15 @@
+import collections
+
 import numpy as np
 import scipy.sparse as sp
 
 from sklearn.base import BaseEstimator
 from sklearn.feature_extraction.text import VectorizerMixin, TfidfVectorizer
-from joblib import cpu_count
+from joblib import Parallel, delayed, cpu_count
 
-from .glove import Glove
 from .corpus import Corpus
-from .glove import check_random_state
+from .glove import Glove, check_random_state
+from .glove_cython import transform_paragraph
 
 PRETRAINED_DICT = {
     50: 'glove.6B.50d.txt',
@@ -16,6 +18,51 @@ PRETRAINED_DICT = {
     300: 'glove.6B.300d.txt',
 }
 
+
+def _transform_paragraph(paragraph, glove, epochs=50, random_state=None,
+                         ignore_missing=False):
+    if glove.word_vectors is None:
+        raise Exception('Model must be fit to transform paragraphs')
+
+    if glove.dictionary is None:
+        raise Exception('Dictionary must be provided to '
+                        'transform paragraphs')
+
+    cooccurrence = collections.defaultdict(lambda: 0.0)
+
+    for token in paragraph:
+        try:
+            cooccurrence[glove.dictionary[token]] += glove.max_count / 10.0
+        except KeyError:
+            if not ignore_missing:
+                raise
+
+    random_state = check_random_state(random_state)
+
+    word_ids = np.array(cooccurrence.keys(), dtype=np.int32)
+    values = np.array(cooccurrence.values(), dtype=np.float64)
+    shuffle_indices = np.arange(len(word_ids), dtype=np.int32)
+
+    # Initialize the vector to mean of constituent word vectors
+    paragraph_vector = np.mean(glove.word_vectors[word_ids], axis=0)
+    sum_gradients = np.ones_like(paragraph_vector)
+
+    # Shuffle the coocurrence matrix
+    random_state.shuffle(shuffle_indices)
+    transform_paragraph(glove.word_vectors,
+                        glove.word_biases,
+                        paragraph_vector,
+                        sum_gradients,
+                        word_ids,
+                        values,
+                        shuffle_indices,
+                        glove.learning_rate,
+                        glove.max_count,
+                        glove.alpha,
+                        epochs)
+
+    return paragraph_vector
+
 class GloveVectorizer(BaseEstimator, VectorizerMixin):
     def __init__(self, input='content', encoding='utf-8',
                  decode_error='strict', strip_accents=None,
@@ -23,8 +70,8 @@ class GloveVectorizer(BaseEstimator, VectorizerMixin):
                  stop_words=None, token_pattern=r"(?u)\b\w\w+\b",
                  ngram_range=(1, 1), analyzer='word', vocabulary=None,
                  window=10, n_components=100, n_jobs=-1, learning_rate=0.05,
-                 n_epochs=10, pre_trained=False,
-                 random_state=None,  verbose=False):
+                 n_glove_epochs=10, n_paragraph_epochs=50,
+                 pre_trained=False, random_state=None,  verbose=False):
         self.input = input
         self.encoding = encoding
         self.decode_error = decode_error
@@ -40,7 +87,8 @@ class GloveVectorizer(BaseEstimator, VectorizerMixin):
         self.window = window
         self.n_components = n_components
         self.learning_rate = learning_rate
-        self.n_epochs = n_epochs
+        self.n_glove_epochs = n_glove_epochs
+        self.n_paragraph_epochs = n_paragraph_epochs
         self._n_jobs = n_jobs
         self.pre_trained = pre_trained
         self.random_state = random_state
@@ -84,7 +132,7 @@ class GloveVectorizer(BaseEstimator, VectorizerMixin):
             self.glove = Glove(no_components=self.n_components,
                                learning_rate=self.learning_rate,
                                random_state=random_state)
-            self.glove.fit(corpus.matrix, epochs=self.n_epochs,
+            self.glove.fit(corpus.matrix, epochs=self.n_glove_epochs,
                            no_threads=self.n_jobs, verbose=self.verbose)
             self.glove.add_dictionary(corpus.dictionary)
 
@@ -104,9 +152,13 @@ class GloveVectorizer(BaseEstimator, VectorizerMixin):
         if apply_analyzer:
             raw_documents = self._apply_analyzer(raw_documents)
 
-        doc_vecs = np.array(
-            [self.glove.transform_paragraph(doc, ignore_missing=True)
-             for doc in raw_documents])
+        result = Parallel(n_jobs=self.n_jobs, backend='threading')(
+            delayed(_transform_paragraph)(
+                doc, self.glove, epochs=self.n_paragraph_epochs,
+                random_state=self.random_state, ignore_missing=True)
+            for doc in raw_documents)
+
+        doc_vecs = np.array(result)
 
         return doc_vecs
 

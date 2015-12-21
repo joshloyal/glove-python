@@ -42,7 +42,7 @@ def fit_vectors(double[:, ::1] wordvec,
     # number of cooccurrences.
     cdef int dim = wordvec.shape[1]
     cdef int no_cooccurrences = row.shape[0]
-    
+
     # Hold indices of current words and
     # the cooccurrence count.
     cdef int word_a, word_b
@@ -88,7 +88,7 @@ def fit_vectors(double[:, ::1] wordvec,
 
                 learning_rate = initial_learning_rate / sqrt(wordvec_sum_gradients[word_a, i])
                 gradient = loss * wordvec[word_b, i]
-                wordvec[word_a, i] = (wordvec[word_a, i] - learning_rate 
+                wordvec[word_a, i] = (wordvec[word_a, i] - learning_rate
                                       * gradient)
                 wordvec_sum_gradients[word_a, i] += gradient ** 2
 
@@ -123,7 +123,7 @@ def transform_paragraph(double[:, ::1] wordvec,
     Compute a vector representation of a paragraph. This has
     the effect of making the paragraph vector close to words
     that occur in it. The representation should be more
-    similar to words that occur in it multiple times, and 
+    similar to words that occur in it multiple times, and
     less close to words that are common in the corpus (have
     large word bias values).
 
@@ -134,7 +134,7 @@ def transform_paragraph(double[:, ::1] wordvec,
     # number of cooccurrences.
     cdef int dim = wordvec.shape[1]
     cdef int no_cooccurrences = row.shape[0]
-    
+
     # Hold indices of current words and
     # the cooccurrence count.
     cdef int word_b, word_a
@@ -151,27 +151,28 @@ def transform_paragraph(double[:, ::1] wordvec,
 
     # We iterate over random indices to simulate
     # shuffling the cooccurrence matrix.
-    for epoch in range(epochs):
-        for j in range(no_cooccurrences):
-            shuffle_index = shuffle_indices[j]
+    with nogil:
+        for epoch in range(epochs):
+            for j in range(no_cooccurrences):
+                shuffle_index = shuffle_indices[j]
 
-            word_b = row[shuffle_index]
-            count = counts[shuffle_index]
+                word_b = row[shuffle_index]
+                count = counts[shuffle_index]
 
-            # Get prediction
-            prediction = 0.0
-            for i in range(dim):
-                prediction = prediction + paragraphvec[i] * wordvec[word_b, i]
-            prediction += wordbias[word_b]
+                # Get prediction
+                prediction = 0.0
+                for i in range(dim):
+                    prediction = prediction + paragraphvec[i] * wordvec[word_b, i]
+                prediction += wordbias[word_b]
 
-            # Compute loss and the example weight.
-            entry_weight = double_min(1.0, (count / max_count)) ** alpha
-            loss = entry_weight * (prediction - c_log(count))
+                # Compute loss and the example weight.
+                entry_weight = double_min(1.0, (count / max_count)) ** alpha
+                loss = entry_weight * (prediction - c_log(count))
 
-            # Update step: apply gradients.
-            for i in range(dim):
-                learning_rate = initial_learning_rate / sqrt(sum_gradients[i])
-                gradient = loss * wordvec[word_b, i]
-                paragraphvec[i] = (paragraphvec[i] - learning_rate 
-                                   * gradient)
-                sum_gradients[i] += gradient ** 2
+                # Update step: apply gradients.
+                for i in range(dim):
+                    learning_rate = initial_learning_rate / sqrt(sum_gradients[i])
+                    gradient = loss * wordvec[word_b, i]
+                    paragraphvec[i] = (paragraphvec[i] - learning_rate
+                                       * gradient)
+                    sum_gradients[i] += gradient ** 2
