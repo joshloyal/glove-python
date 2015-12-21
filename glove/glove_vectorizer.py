@@ -3,8 +3,11 @@ import scipy.sparse as sp
 
 from sklearn.base import BaseEstimator
 from sklearn.feature_extraction.text import VectorizerMixin, TfidfVectorizer
+from joblib import cpu_count
 
-from .glove import Glove, check_random_state
+from .glove import Glove
+from .corpus import Corpus
+from .glove import check_random_state
 
 PRETRAINED_DICT = {
     50: 'glove.6B.50d.txt',
@@ -19,8 +22,9 @@ class GloveVectorizer(BaseEstimator, VectorizerMixin):
                  lowercase=True, preprocessor=None, tokenizer=None,
                  stop_words=None, token_pattern=r"(?u)\b\w\w+\b",
                  ngram_range=(1, 1), analyzer='word', vocabulary=None,
-                 n_components=100, pre_trained=True,
-                 use_idf=False, random_state=None):
+                 window=10, n_components=100, n_jobs=-1, learning_rate=0.05,
+                 n_epochs=10, pre_trained=False,
+                 random_state=None,  verbose=False):
         self.input = input
         self.encoding = encoding
         self.decode_error = decode_error
@@ -33,10 +37,15 @@ class GloveVectorizer(BaseEstimator, VectorizerMixin):
         self.token_pattern = token_pattern
         self.stop_words = stop_words
 
+        self.window = window
         self.n_components = n_components
+        self.learning_rate = learning_rate
+        self.n_epochs = n_epochs
+        self._n_jobs = n_jobs
         self.pre_trained = pre_trained
-        self.use_idf = use_idf
         self.random_state = random_state
+        self.verbose = verbose
+
         self.glove = None
 
     @property
@@ -45,11 +54,20 @@ class GloveVectorizer(BaseEstimator, VectorizerMixin):
             raise ValueError('Model not fitted.')
         return self.glove.dictionary
 
+    @property
+    def n_jobs(self):
+        if self._n_jobs < 0:
+            return cpu_count()
+        return min(self._n_jobs, cpu_count())
+
     def fit(self, raw_documents, y=None):
         self.fit_transform(raw_documents)
         return self
 
     def fit_transform(self, raw_documents, y=None):
+        random_state = check_random_state(self.random_state)
+
+        raw_documents = self._apply_analyzer(raw_documents)
 
         if self.pre_trained:
             # get the pre-trained glove vectors
@@ -59,37 +77,35 @@ class GloveVectorizer(BaseEstimator, VectorizerMixin):
                 raise ValueError('No pretrained glove representation with '
                                  'n_components = {}'.format(self.n_components))
             self.glove = Glove.load_stanford(pretrained_vectors)
+            self.glove.random_state = random_state
             self.fixed_vocabulary_ = True
         else:
-            raise NotImplementedError('training not implemented')
+            corpus = Corpus().fit(raw_documents, window=self.window)
+            self.glove = Glove(no_components=self.n_components,
+                               learning_rate=self.learning_rate,
+                               random_state=random_state)
+            self.glove.fit(corpus.matrix, epochs=self.n_epochs,
+                           no_threads=self.n_jobs, verbose=self.verbose)
+            self.glove.add_dictionary(corpus.dictionary)
 
-        random_state = check_random_state(self.random_state)
-        self.glove.random_state = random_state
-        transformed_X = self._apply_glove(raw_documents)
-
-        # train a tfidf matrix
-        if self.use_idf:
-            self.tfidf = TfidfVectorizer()
-            tfidf_X = self.tfidf.fit_transform(raw_documents)
-            transformed_X = sp.hstack((transformed_X, tfidf_X))
-
-        return transformed_X
+        return self._apply_glove(raw_documents, apply_analyzer=False)
 
     def transform(self, raw_documents):
         if self.glove is None:
             raise RuntimeError('Model glove must be fit first.')
 
-        transformed_X = self._apply_glove(raw_documents)
-        if self.use_idf:
-            tfidf_X = self.tfidf.transform(raw_documents)
-            transformed_X = sp.hstack((transformed_X, tfidf_X))
+        return self._apply_glove(raw_documents)
 
-        return transformed_X
-
-    def _apply_glove(self, raw_documents):
+    def _apply_analyzer(self, raw_documents):
         analyze = self.build_analyzer()
+        return [analyze(doc) for doc in raw_documents]
+
+    def _apply_glove(self, raw_documents, apply_analyzer=True):
+        if apply_analyzer:
+            raw_documents = self._apply_analyzer(raw_documents)
+
         doc_vecs = np.array(
-            [self.glove.transform_paragraph(analyze(doc), ignore_missing=True)
+            [self.glove.transform_paragraph(doc, ignore_missing=True)
              for doc in raw_documents])
 
         return doc_vecs
